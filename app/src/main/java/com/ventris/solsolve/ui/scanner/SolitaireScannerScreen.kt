@@ -39,6 +39,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -97,7 +99,6 @@ fun SolitaireScannerScreen() {
     )
 
     LaunchedEffect(Unit) {
-        // Only reset state on first composition; permission will be requested explicitly by the user
         SolitaireDetectionState.reset()
     }
 
@@ -105,32 +106,35 @@ fun SolitaireScannerScreen() {
         permissionLauncher.launch(Manifest.permission.CAMERA)
     }
 
-    Column(
+    LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .padding(16.dp)
-            .verticalScroll(rememberScrollState()),
+            .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text(
-            text = "SolSolve",
-            style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.Bold
-        )
-        Text(
-            text = "Take a snapshot of the solitaire game. We'll analyze it and guide you to solve it.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-
-        when (SolitaireDetectionState.mode.value) {
-            ScannerMode.PREVIEW -> PreviewModeCard(hasCameraPermission, requestPermission)
-            ScannerMode.SOLVING -> SolvingModeCard()
+        item {
+            Text(
+                text = "SolSolve",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold
+            )
         }
-
-        ScanStatusAndActions()
-        DetectedStepsPanel()
-        ScanLogPanel()
+        item {
+            Text(
+                text = "Take a snapshot of the solitaire game. We'll analyze it and guide you to solve it.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        item {
+            when (SolitaireDetectionState.mode.value) {
+                ScannerMode.PREVIEW -> PreviewModeCard(hasCameraPermission, requestPermission)
+                ScannerMode.SOLVING -> SolvingModeCard()
+            }
+        }
+        item { ScanStatusAndActions() }
+        item { DetectedStepsPanel() }
+        item { ScanLogPanel() }
     }
 }
 
@@ -355,8 +359,7 @@ private fun ScanLogPanel() {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp)
-                .verticalScroll(rememberScrollState()),
+                .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text("Scan log", style = MaterialTheme.typography.titleMedium)
