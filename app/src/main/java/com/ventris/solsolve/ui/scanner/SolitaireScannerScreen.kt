@@ -77,6 +77,7 @@ import java.io.File
 import java.util.concurrent.Executors
 import kotlin.math.abs
 import kotlin.math.max
+import androidx.camera.core.AspectRatio
 
 @Composable
 fun SolitaireScannerScreen() {
@@ -96,8 +97,12 @@ fun SolitaireScannerScreen() {
     )
 
     LaunchedEffect(Unit) {
-        if (!hasCameraPermission) permissionLauncher.launch(Manifest.permission.CAMERA)
+        // Only reset state on first composition; permission will be requested explicitly by the user
         SolitaireDetectionState.reset()
+    }
+
+    val requestPermission: () -> Unit = {
+        permissionLauncher.launch(Manifest.permission.CAMERA)
     }
 
     Column(
@@ -119,7 +124,7 @@ fun SolitaireScannerScreen() {
         )
 
         when (SolitaireDetectionState.mode.value) {
-            ScannerMode.PREVIEW -> PreviewModeCard(hasCameraPermission)
+            ScannerMode.PREVIEW -> PreviewModeCard(hasCameraPermission, requestPermission)
             ScannerMode.SOLVING -> SolvingModeCard()
         }
 
@@ -130,7 +135,7 @@ fun SolitaireScannerScreen() {
 }
 
 @Composable
-private fun PreviewModeCard(hasCameraPermission: Boolean) {
+private fun PreviewModeCard(hasCameraPermission: Boolean, onRequestPermission: () -> Unit) {
     Card(shape = RoundedCornerShape(16.dp)) {
         Box(
             modifier = Modifier
@@ -140,7 +145,7 @@ private fun PreviewModeCard(hasCameraPermission: Boolean) {
             if (hasCameraPermission) {
                 CameraPreviewWithCapture()
             } else {
-                PermissionMissing()
+                PermissionMissing(onRequestPermission)
             }
         }
     }
@@ -163,7 +168,6 @@ private fun SolvingModeCard() {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    // Mini preview
                     bitmap?.let {
                         Image(
                             bitmap = it.asImageBitmap(),
@@ -186,7 +190,6 @@ private fun SolvingModeCard() {
                 }
             }
 
-            // Annotated snapshot (visual overlay removed as requested)
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -195,7 +198,6 @@ private fun SolvingModeCard() {
             ) {
                 bitmap?.let { bmp ->
                     Image(bitmap = bmp.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize())
-                    // Drive internal reasoning/logging sequence
                     CardsOverlay()
                 }
             }
@@ -212,14 +214,14 @@ private fun CameraPreviewWithCapture() {
     val imageCapture = remember {
         ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-            .setTargetResolution(Size(720, 1280))
+            .setTargetAspectRatio(AspectRatio.RATIO_4_3)
             .build()
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
         AndroidViewCamera(previewView = previewView) { provider ->
             val preview = Preview.Builder()
-                .setTargetResolution(Size(720, 1280))
+                .setTargetAspectRatio(AspectRatio.RATIO_4_3)
                 .build()
             preview.setSurfaceProvider(previewView.surfaceProvider)
 
@@ -231,7 +233,9 @@ private fun CameraPreviewWithCapture() {
                     preview,
                     imageCapture
                 )
-            } catch (_: Exception) { }
+            } catch (e: Exception) {
+                SolitaireDetectionState.addLog(LogSeverity.ERROR, "Camera bind failed: ${e.message}")
+            }
         }
 
         ScanningOverlay(borderCornerSize = 28.dp, onPulse = { })
@@ -262,15 +266,16 @@ private fun CameraPreviewWithCapture() {
 }
 
 @Composable
-private fun PermissionMissing() {
+private fun PermissionMissing(onRequestPermission: () -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black),
         contentAlignment = Alignment.Center
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp),
             modifier = Modifier
                 .background(
                     MaterialTheme.colorScheme.surface.copy(alpha = 0.9f),
@@ -278,9 +283,12 @@ private fun PermissionMissing() {
                 )
                 .padding(16.dp)
         ) {
-            Icon(Icons.Default.Info, contentDescription = null)
-            Spacer(Modifier.size(8.dp))
-            Text("Camera permission required to scan.")
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Info, contentDescription = null)
+                Spacer(Modifier.size(8.dp))
+                Text("Camera permission required to scan.")
+            }
+            Button(onClick = onRequestPermission) { Text("Grant Camera Permission") }
         }
     }
 }
@@ -417,9 +425,7 @@ private fun AndroidViewCamera(
         cameraProviderFuture.addListener(listener, ContextCompat.getMainExecutor(context))
 
         onDispose {
-            try {
-                ProcessCameraProvider.getInstance(context).get().unbindAll()
-            } catch (_: Exception) { }
+            // Let lifecycle unbind; avoid blocking get() here to reduce crash risk
         }
     }
 
