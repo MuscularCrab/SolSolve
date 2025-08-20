@@ -36,11 +36,11 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -50,6 +50,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Refresh
@@ -80,6 +81,8 @@ import java.util.concurrent.Executors
 import kotlin.math.abs
 import kotlin.math.max
 import androidx.camera.core.AspectRatio
+import androidx.exifinterface.media.ExifInterface
+import android.graphics.Matrix
 
 @Composable
 fun SolitaireScannerScreen() {
@@ -189,8 +192,14 @@ private fun SolvingModeCard() {
                         }
                     }
                 }
-                IconButton(onClick = { SolitaireDetectionState.reset() }) {
-                    Icon(Icons.Default.Refresh, contentDescription = "Rescan")
+                Row {
+                    IconButton(onClick = { SolitaireDetectionState.reset() }) {
+                        Icon(Icons.Default.Refresh, contentDescription = "Rescan")
+                    }
+                    val context = LocalContext.current
+                    IconButton(onClick = { SolitaireDetectionState.clearAll(context) }) {
+                        Icon(Icons.Default.Delete, contentDescription = "Delete All")
+                    }
                 }
             }
 
@@ -320,8 +329,14 @@ private fun ScanStatusAndActions() {
             style = MaterialTheme.typography.bodyMedium,
             fontWeight = FontWeight.Medium
         )
-        IconButton(onClick = { SolitaireDetectionState.reset() }) {
-            Icon(Icons.Default.Refresh, contentDescription = "Rescan")
+        Row {
+            IconButton(onClick = { SolitaireDetectionState.reset() }) {
+                Icon(Icons.Default.Refresh, contentDescription = "Rescan")
+            }
+            val context = LocalContext.current
+            IconButton(onClick = { SolitaireDetectionState.clearAll(context) }) {
+                Icon(Icons.Default.Delete, contentDescription = "Delete All")
+            }
         }
     }
 }
@@ -565,7 +580,29 @@ private object SolitaireDetectionState {
         addLog(LogSeverity.INFO, "Ready. Take a snapshot when the game fills the frame.")
     }
 
+    fun clearAll(context: android.content.Context) {
+        // Delete cached snapshots
+        try {
+            context.cacheDir.listFiles()?.forEach { f ->
+                if (f.name.startsWith("solsolve_snapshot_")) {
+                    f.delete()
+                }
+            }
+        } catch (_: Exception) { }
+        // Reset all in-memory state
+        reset()
+    }
+
     fun onSnapshotSaved(file: File) {
+        // Clear previous cycle so UI doesn't show stale moves/logs
+        overlayBoxes.value = emptyList()
+        currentBoxIndex.value = 0
+        steps.value = emptyList()
+        logs.value = emptyList()
+        partial.value = false
+        reasoningStarted.value = false
+        reasoningInProgress.value = false
+
         capturedPath.value = file.absolutePath
         // Decode a scaled bitmap for faster analysis and UI
         val opts = BitmapFactory.Options().apply {
@@ -579,23 +616,35 @@ private object SolitaireDetectionState {
             inSampleSize = sample
             inPreferredConfig = Bitmap.Config.RGB_565
         }
-        val bmp = BitmapFactory.decodeFile(file.absolutePath, loadOpts)
+        var bmp = BitmapFactory.decodeFile(file.absolutePath, loadOpts)
+        // Adjust orientation based on EXIF so preview is portrait
+        bmp = try {
+            val exif = ExifInterface(file.absolutePath)
+            val orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+            val angle = when (orientation) {
+                ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                else -> 0f
+            }
+            if (angle != 0f && bmp != null) {
+                val m = Matrix().apply { postRotate(angle) }
+                Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+            } else bmp
+        } catch (_: Exception) { bmp }
         capturedBitmap.value = bmp
-        reasoningStarted.value = false
         analyzeSnapshot(bmp)
     }
 
     private fun analyzeSnapshot(bitmap: Bitmap?) {
         if (bitmap == null) return
         addLog(LogSeverity.INFO, "Analyzing snapshot…")
-        // Basic heuristic: edge and white ratios on scaled bitmap
         val (edgeRatio, whiteRatio) = estimateHeuristics(bitmap)
         addLog(LogSeverity.INFO, "Heuristics: edges=${"%.3f".format(edgeRatio)}, white=${"%.3f".format(whiteRatio)}")
         partial.value = edgeRatio < 0.06f || whiteRatio < 0.12f
         if (partial.value) {
             addLog(LogSeverity.WARN, "Partial solitaire game detected. Include all piles and improve lighting if possible.")
         }
-        // Generate dummy card regions laid out like 7 tableau columns
         overlayBoxes.value = generateDummyCardRegions()
         steps.value = listOf(
             "Move 7♣ from Tableau 4 to Foundation",
