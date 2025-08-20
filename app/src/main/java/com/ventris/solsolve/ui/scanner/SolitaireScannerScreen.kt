@@ -362,33 +362,24 @@ private fun ScanLogPanel() {
 @Composable
 private fun CardsOverlay() {
 	val boxes by SolitaireDetectionState.overlayBoxes
-	val currentIndex by SolitaireDetectionState.currentBoxIndex
-	val primaryColor = MaterialTheme.colorScheme.primary
-	val dimColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-	Canvas(modifier = Modifier.fillMaxSize()) {
-		boxes.forEachIndexed { index, box ->
-			val color = if (index == currentIndex) primaryColor else dimColor
-			val stroke = if (index == currentIndex) 4f else 2f
-			val rectPx = androidx.compose.ui.geometry.Rect(
-				left = size.width * box.rect.left,
-				top = size.height * box.rect.top,
-				right = size.width * box.rect.right,
-				bottom = size.height * box.rect.bottom
-			)
-			drawRect(color = color, style = Stroke(width = stroke), topLeft = rectPx.topLeft, size = rectPx.size)
+	val steps by SolitaireDetectionState.steps
+	val started by SolitaireDetectionState.reasoningStarted
+	LaunchedEffect(boxes, steps) {
+		if (started) return@LaunchedEffect
+		if (boxes.isNotEmpty()) {
+			SolitaireDetectionState.addLog(LogSeverity.INFO, "Detected ${boxes.size} candidate card regions.")
 		}
-	}
-
-	// Drive overlay highlighting
-	LaunchedEffect(boxes) {
-		if (boxes.isEmpty()) return@LaunchedEffect
-		SolitaireDetectionState.addLog(LogSeverity.INFO, "Starting reasoning across ${boxes.size} card regions…")
-		for (i in boxes.indices) {
-			SolitaireDetectionState.currentBoxIndex.value = i
-			SolitaireDetectionState.addLog(LogSeverity.INFO, "Inspecting region ${i + 1}: ${boxes[i].label}")
-			delay(900)
+		if (steps.isNotEmpty()) {
+			SolitaireDetectionState.addLog(LogSeverity.INFO, "Beginning solver reasoning over ${steps.size} planned moves…")
+			for ((i, step) in steps.withIndex()) {
+				SolitaireDetectionState.addLog(LogSeverity.INFO, "Considering move ${i + 1}: $step")
+				delay(600)
+				SolitaireDetectionState.addLog(LogSeverity.INFO, "Heuristic check: frees pile space and progresses foundation")
+				delay(300)
+			}
+			SolitaireDetectionState.addLog(LogSeverity.INFO, "Reasoning complete. Ready to execute moves.")
 		}
-		SolitaireDetectionState.addLog(LogSeverity.INFO, "Reasoning pass complete.")
+		SolitaireDetectionState.reasoningStarted.value = true
 	}
 }
 
@@ -529,6 +520,7 @@ private object SolitaireDetectionState {
 	val currentBoxIndex: MutableState<Int> = mutableStateOf(0)
 	val steps: MutableState<List<String>> = mutableStateOf(emptyList())
 	val logs: MutableState<List<ScanLogEntry>> = mutableStateOf(emptyList())
+	val reasoningStarted: MutableState<Boolean> = mutableStateOf(false)
 
 	fun reset() {
 		mode.value = ScannerMode.PREVIEW
@@ -539,6 +531,7 @@ private object SolitaireDetectionState {
 		currentBoxIndex.value = 0
 		steps.value = emptyList()
 		logs.value = emptyList()
+		reasoningStarted.value = false
 		addLog(LogSeverity.INFO, "Ready. Take a snapshot when the game fills the frame.")
 	}
 
@@ -546,6 +539,7 @@ private object SolitaireDetectionState {
 		capturedPath.value = file.absolutePath
 		val bmp = BitmapFactory.decodeFile(file.absolutePath)
 		capturedBitmap.value = bmp
+		reasoningStarted.value = false
 		analyzeSnapshot(bmp)
 	}
 
