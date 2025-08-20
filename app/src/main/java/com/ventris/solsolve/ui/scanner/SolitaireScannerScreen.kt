@@ -55,6 +55,7 @@ import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.WarningAmber
+import androidx.compose.material3.Switch
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -83,6 +84,15 @@ import kotlin.math.max
 import androidx.camera.core.AspectRatio
 import androidx.exifinterface.media.ExifInterface
 import android.graphics.Matrix
+import org.opencv.android.Utils
+import org.opencv.core.Mat
+import org.opencv.core.MatOfPoint
+import org.opencv.core.MatOfPoint2f
+import org.opencv.core.Point
+import org.opencv.core.Rect
+import org.opencv.core.Scalar
+import org.opencv.core.Size as CvSize
+import org.opencv.imgproc.Imgproc
 
 @Composable
 fun SolitaireScannerScreen() {
@@ -315,6 +325,7 @@ private fun ScanStatusAndActions() {
     ) {
         val mode by SolitaireDetectionState.mode
         val partial by SolitaireDetectionState.partial
+        val demoMode by SolitaireDetectionState.demoMode
         val statusText = when (mode) {
             ScannerMode.PREVIEW -> "Ready. Tap Take Snapshot."
             ScannerMode.SOLVING -> if (partial) "Solving (partial game)" else "Solving"
@@ -329,7 +340,9 @@ private fun ScanStatusAndActions() {
             style = MaterialTheme.typography.bodyMedium,
             fontWeight = FontWeight.Medium
         )
-        Row {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Demo", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(end = 6.dp))
+            Switch(checked = demoMode, onCheckedChange = { SolitaireDetectionState.demoMode.value = it })
             IconButton(onClick = { SolitaireDetectionState.reset() }) {
                 Icon(Icons.Default.Refresh, contentDescription = "Rescan")
             }
@@ -344,7 +357,8 @@ private fun ScanStatusAndActions() {
 @Composable
 private fun DetectedStepsPanel() {
     val steps by SolitaireDetectionState.steps
-    AnimatedVisibility(visible = steps.isNotEmpty()) {
+    val demoMode by SolitaireDetectionState.demoMode
+    AnimatedVisibility(visible = steps.isNotEmpty() || !demoMode) {
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(16.dp)
@@ -355,9 +369,18 @@ private fun DetectedStepsPanel() {
                     .padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Text("Next best moves", style = MaterialTheme.typography.titleMedium)
-                steps.take(8).forEachIndexed { index, step ->
-                    Text("${index + 1}. $step", style = MaterialTheme.typography.bodyMedium)
+                if (steps.isNotEmpty()) {
+                    Text("Next best moves", style = MaterialTheme.typography.titleMedium)
+                    steps.take(8).forEachIndexed { index, step ->
+                        Text("${index + 1}. $step", style = MaterialTheme.typography.bodyMedium)
+                    }
+                } else {
+                    Text("No computed moves", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "A solver model is not installed. Enable Demo to see sample suggestions.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }
@@ -565,6 +588,7 @@ private object SolitaireDetectionState {
     val logs: MutableState<List<ScanLogEntry>> = mutableStateOf(emptyList())
     val reasoningStarted: MutableState<Boolean> = mutableStateOf(false)
     val reasoningInProgress: MutableState<Boolean> = mutableStateOf(false)
+    val demoMode: MutableState<Boolean> = mutableStateOf(false)
 
     fun reset() {
         mode.value = ScannerMode.PREVIEW
@@ -594,7 +618,6 @@ private object SolitaireDetectionState {
     }
 
     fun onSnapshotSaved(file: File) {
-        // Clear previous cycle so UI doesn't show stale moves/logs
         overlayBoxes.value = emptyList()
         currentBoxIndex.value = 0
         steps.value = emptyList()
@@ -604,7 +627,6 @@ private object SolitaireDetectionState {
         reasoningInProgress.value = false
 
         capturedPath.value = file.absolutePath
-        // Decode a scaled bitmap for faster analysis and UI
         val opts = BitmapFactory.Options().apply {
             inJustDecodeBounds = true
         }
@@ -617,8 +639,14 @@ private object SolitaireDetectionState {
             inPreferredConfig = Bitmap.Config.RGB_565
         }
         var bmp = BitmapFactory.decodeFile(file.absolutePath, loadOpts)
-        // Adjust orientation based on EXIF so preview is portrait
-        bmp = try {
+        bmp = adjustOrientationIfNeeded(file, bmp)
+        capturedBitmap.value = bmp
+        analyzeSnapshot(bmp)
+    }
+
+    private fun adjustOrientationIfNeeded(file: File, input: Bitmap?): Bitmap? {
+        if (input == null) return null
+        return try {
             val exif = ExifInterface(file.absolutePath)
             val orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
             val angle = when (orientation) {
@@ -627,32 +655,42 @@ private object SolitaireDetectionState {
                 ExifInterface.ORIENTATION_ROTATE_270 -> 270f
                 else -> 0f
             }
-            if (angle != 0f && bmp != null) {
+            if (angle != 0f) {
                 val m = Matrix().apply { postRotate(angle) }
-                Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
-            } else bmp
-        } catch (_: Exception) { bmp }
-        capturedBitmap.value = bmp
-        analyzeSnapshot(bmp)
+                Bitmap.createBitmap(input, 0, 0, input.width, input.height, m, true)
+            } else input
+        } catch (_: Exception) { input }
     }
 
     private fun analyzeSnapshot(bitmap: Bitmap?) {
         if (bitmap == null) return
         addLog(LogSeverity.INFO, "Analyzing snapshot…")
+        // Try OpenCV contour-based detection
+        var tableauCols = 0
+        var totalCards = 0
+        try {
+            val (cols, count) = detectCardsWithOpenCv(bitmap)
+            tableauCols = cols
+            totalCards = count
+            addLog(LogSeverity.INFO, "OpenCV: detected ~$totalCards card contours across $tableauCols columns")
+        } catch (e: Throwable) {
+            addLog(LogSeverity.WARN, "OpenCV detection unavailable: ${e.message}")
+        }
+
         val (edgeRatio, whiteRatio) = estimateHeuristics(bitmap)
         addLog(LogSeverity.INFO, "Heuristics: edges=${"%.3f".format(edgeRatio)}, white=${"%.3f".format(whiteRatio)}")
-        partial.value = edgeRatio < 0.06f || whiteRatio < 0.12f
+        partial.value = (edgeRatio < 0.06f || whiteRatio < 0.12f) || tableauCols < 5
         if (partial.value) {
             addLog(LogSeverity.WARN, "Partial solitaire game detected. Include all piles and improve lighting if possible.")
         }
         overlayBoxes.value = generateDummyCardRegions()
-        steps.value = listOf(
-            "Move 7♣ from Tableau 4 to Foundation",
-            "Move 6♦ from Tableau 2 to 7♣",
-            "Reveal stock and play A♥ to Foundation",
-            "Move 2♥ to Foundation",
-            "Move 3♥ to Foundation"
-        )
+        if (demoMode.value) {
+            steps.value = if (totalCards > 0) generateDemoStepsFromDetection(tableauCols, totalCards) else generateDemoSteps(edgeRatio, whiteRatio)
+            addLog(LogSeverity.INFO, "Demo mode: generated suggestions from detection.")
+        } else {
+            steps.value = emptyList()
+            addLog(LogSeverity.INFO, "No solver model installed; moves not computed.")
+        }
         mode.value = ScannerMode.SOLVING
         addLog(LogSeverity.INFO, "Solving started (${overlayBoxes.value.size} regions).")
     }
@@ -683,6 +721,64 @@ private object SolitaireDetectionState {
         return edgeRatio to whiteRatio
     }
 
+    private fun detectCardsWithOpenCv(srcBmp: Bitmap): Pair<Int, Int> {
+        val bmp = if (srcBmp.width > 1280) Bitmap.createScaledBitmap(srcBmp, 1280, (1280f/srcBmp.width*srcBmp.height).toInt(), true) else srcBmp
+        val mat = Mat()
+        Utils.bitmapToMat(bmp, mat)
+        val gray = Mat()
+        Imgproc.cvtColor(mat, gray, Imgproc.COLOR_RGBA2GRAY)
+        Imgproc.GaussianBlur(gray, gray, CvSize(5.0,5.0), 0.0)
+        val edges = Mat()
+        Imgproc.Canny(gray, edges, 60.0, 120.0)
+        val contours = mutableListOf<MatOfPoint>()
+        Imgproc.findContours(edges, contours, Mat(), Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
+        var cardCount = 0
+        val xs = mutableListOf<Double>()
+        contours.forEach { c ->
+            val peri = Imgproc.arcLength(MatOfPoint2f(*c.toArray()), true)
+            val approx = MatOfPoint2f()
+            Imgproc.approxPolyDP(MatOfPoint2f(*c.toArray()), approx, 0.02 * peri, true)
+            val pts = approx.toArray()
+            if (pts.size == 4) {
+                val rect = Imgproc.boundingRect(MatOfPoint(*pts.map { org.opencv.core.Point(it.x, it.y) }.toTypedArray()))
+                val w = rect.width.toDouble()
+                val h = rect.height.toDouble()
+                val area = w * h
+                val aspect = max(w,h) / max(1.0, minOf(w,h))
+                if (area > 1000 && area < (bmp.width * bmp.height * 0.25) && aspect in 1.2..2.2) {
+                    cardCount++
+                    xs.add(rect.x.toDouble())
+                }
+            }
+        }
+        // Estimate columns by clustering x positions into ~7 bins
+        xs.sort()
+        var cols = 0
+        var prev = -1.0
+        val thresh = bmp.width / 20.0
+        xs.forEach { x ->
+            if (prev < 0 || kotlin.math.abs(x - prev) > thresh) cols++
+            prev = x
+        }
+        return cols to cardCount
+    }
+
+    private fun generateDemoStepsFromDetection(cols: Int, count: Int): List<String> {
+        val piles = (1..max(1, cols)).map { "Tableau $it" }
+        val ranks = listOf("A","2","3","4","5","6","7","8","9","10","J","Q","K")
+        val suits = listOf("♣","♦","♥","♠")
+        fun pickRank(i:Int)=ranks[(i+count+cols).mod(ranks.size)]
+        fun pickSuit(i:Int)=suits[(i+count).mod(suits.size)]
+        fun pile(i:Int)=piles[(i+cols).mod(piles.size)]
+        return listOf(
+            "Move ${pickRank(1)}${pickSuit(2)} from ${pile(3)} to Foundation",
+            "Move ${pickRank(4)}${pickSuit(5)} from ${pile(6)} to ${pickRank(7)}${pickSuit(8)}",
+            "Reveal stock and play ${pickRank(9)}${pickSuit(10)} to Foundation",
+            "Move ${pickRank(11)}${pickSuit(12)} to Foundation",
+            "Move ${pickRank(13)}${pickSuit(14)} to ${pile(15)}"
+        )
+    }
+
     private fun generateDummyCardRegions(): List<CardRegion> {
         val cols = 7
         val marginX = 0.06f
@@ -702,6 +798,20 @@ private object SolitaireDetectionState {
             )
         }
         return regions
+    }
+
+    private fun generateDemoSteps(edgeRatio: Float, whiteRatio: Float): List<String> {
+        val seeds = (edgeRatio * 1000).toInt() xor (whiteRatio * 1000).toInt()
+        val piles = listOf("Tableau 1","Tableau 2","Tableau 3","Tableau 4","Tableau 5","Tableau 6","Tableau 7")
+        val ranks = listOf("A","2","3","4","5","6","7","8","9","10","J","Q","K")
+        val suits = listOf("♣","♦","♥","♠")
+        fun pick(list: List<String>, i: Int) = list[(i + seeds).mod(list.size)]
+        val s1 = "Move ${pick(ranks,1)}${pick(suits,2)} from ${pick(piles,3)} to Foundation"
+        val s2 = "Move ${pick(ranks,4)}${pick(suits,5)} from ${pick(piles,6)} to ${pick(ranks,7)}${pick(suits,8)}"
+        val s3 = "Reveal stock and play ${pick(ranks,9)}${pick(suits,10)} to Foundation"
+        val s4 = "Move ${pick(ranks,11)}${pick(suits,12)} to Foundation"
+        val s5 = "Move ${pick(ranks,13)}${pick(suits,14)} to ${pick(piles,15)}"
+        return listOf(s1,s2,s3,s4,s5)
     }
 
     fun addLog(severity: LogSeverity, message: String) {
