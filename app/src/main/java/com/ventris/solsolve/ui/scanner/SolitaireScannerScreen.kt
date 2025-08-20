@@ -30,16 +30,21 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -58,7 +63,10 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.delay
+import java.nio.ByteBuffer
 import java.util.concurrent.Executors
+import kotlin.math.abs
+import kotlin.math.max
 
 @Composable
 fun SolitaireScannerScreen() {
@@ -79,6 +87,7 @@ fun SolitaireScannerScreen() {
 
 	LaunchedEffect(Unit) {
 		if (!hasCameraPermission) permissionLauncher.launch(Manifest.permission.CAMERA)
+		SolitaireDetectionState.reset()
 	}
 
 	Column(
@@ -116,6 +125,7 @@ fun SolitaireScannerScreen() {
 
 		ScanStatusAndActions()
 		DetectedStepsPanel()
+		ScanLogPanel()
 	}
 }
 
@@ -124,8 +134,8 @@ private fun CameraPreviewWithOverlay() {
 	val context = LocalContext.current
 	val lifecycleOwner = LocalLifecycleOwner.current
 	val previewView = remember { PreviewView(context) }
-	var isAnalyzing by remember { mutableStateOf(true) }
-	var progressText by remember { mutableStateOf("Scanning for solitaire layout…") }
+	val mainExecutor = remember { ContextCompat.getMainExecutor(context) }
+	val analyzing by SolitaireDetectionState.analyzing
 
 	Box(modifier = Modifier.fillMaxSize()) {
 		AndroidViewCamera(previewView = previewView) { provider ->
@@ -140,9 +150,66 @@ private fun CameraPreviewWithOverlay() {
 				.build()
 
 			val analysisExecutor = Executors.newSingleThreadExecutor()
+			var frameCounter = 0
+			var stableHits = 0
+			var resultPosted = false
+			val startMs = System.currentTimeMillis()
 			analyzer.setAnalyzer(analysisExecutor) { imageProxy ->
-				// Placeholder analyzer simulating work; replace with ML/vision later
-				imageProxy.close()
+				try {
+					// Throttle to 1/4 frames
+					frameCounter = (frameCounter + 1) and 3
+					if (frameCounter != 0) {
+						imageProxy.close(); return@setAnalyzer
+					}
+					val yPlane = imageProxy.planes.getOrNull(0)
+					if (yPlane == null) { imageProxy.close(); return@setAnalyzer }
+					val buffer: ByteBuffer = yPlane.buffer
+					val rowStride = yPlane.rowStride
+					val pixelStride = yPlane.pixelStride
+					val width = imageProxy.width
+					val height = imageProxy.height
+					val step = 12
+					var samples = 0
+					var edges = 0
+					var whiteish = 0
+					for (y in 0 until height step step) {
+						var prev = -1
+						for (x in 0 until width step step) {
+							val idx = y * rowStride + x * pixelStride
+							val v = buffer.get(idx).toInt() and 0xFF
+							if (prev >= 0 && abs(v - prev) > 25) edges++
+							if (v > 200) whiteish++
+							prev = v
+							samples++
+						}
+					}
+					val edgeRatio = if (samples > 0) edges.toFloat() / samples else 0f
+					val whiteRatio = if (samples > 0) whiteish.toFloat() / samples else 0f
+					val looksLikeCards = edgeRatio > 0.06f && whiteRatio > 0.12f
+					if (looksLikeCards) stableHits++ else stableHits = max(0, stableHits - 1)
+					val elapsed = System.currentTimeMillis() - startMs
+					if (!resultPosted && stableHits >= 6) {
+						resultPosted = true
+						mainExecutor.execute {
+							SolitaireDetectionState.onDetectionSuccess(
+								edgeRatio = edgeRatio,
+								whiteRatio = whiteRatio
+							)
+						}
+					} else if (!resultPosted && elapsed > 6000) {
+						resultPosted = true
+						mainExecutor.execute {
+							SolitaireDetectionState.onNoGameDetected(
+								edgeRatio = edgeRatio,
+								whiteRatio = whiteRatio
+							)
+						}
+					}
+				} catch (_: Exception) {
+					// ignore analyzer errors for now
+				} finally {
+					imageProxy.close()
+				}
 			}
 
 			try {
@@ -161,7 +228,7 @@ private fun CameraPreviewWithOverlay() {
 			onPulse = { /* no-op */ }
 		)
 
-		AnimatedVisibility(visible = isAnalyzing) {
+		AnimatedVisibility(visible = analyzing) {
 			Row(
 				modifier = Modifier
 					.align(Alignment.BottomCenter)
@@ -178,20 +245,9 @@ private fun CameraPreviewWithOverlay() {
 					strokeWidth = 2.dp
 				)
 				Spacer(modifier = Modifier.size(12.dp))
-				Text(progressText, style = MaterialTheme.typography.bodyMedium)
+				Text("Scanning…", style = MaterialTheme.typography.bodyMedium)
 			}
 		}
-	}
-
-	LaunchedEffect(Unit) {
-		// Simulate scanning progress and completion
-		delay(1400)
-		progressText = "Detecting piles and face-up cards…"
-		delay(1400)
-		progressText = "Computing optimal move sequence…"
-		delay(1400)
-		SolitaireDetectionState.sampleResult()
-		isAnalyzing = false
 	}
 }
 
@@ -227,9 +283,19 @@ private fun ScanStatusAndActions() {
 		verticalAlignment = Alignment.CenterVertically
 	) {
 		val detected by SolitaireDetectionState.detected
+		val analyzing by SolitaireDetectionState.analyzing
+		val statusText = when {
+			analyzing -> "Scanning…"
+			detected -> "Scan successful"
+			else -> "No game detected"
+		}
 		Text(
-			text = if (detected) "Scan successful" else "Scanning…",
-			color = if (detected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+			text = statusText,
+			color = when {
+				detected -> MaterialTheme.colorScheme.primary
+				analyzing -> MaterialTheme.colorScheme.onSurfaceVariant
+				else -> MaterialTheme.colorScheme.error
+			},
 			style = MaterialTheme.typography.bodyMedium,
 			fontWeight = FontWeight.Medium
 		)
@@ -254,8 +320,47 @@ private fun DetectedStepsPanel() {
 				verticalArrangement = Arrangement.spacedBy(8.dp)
 			) {
 				Text("Next best moves", style = MaterialTheme.typography.titleMedium)
-				steps.take(5).forEachIndexed { index, step ->
+				steps.take(8).forEachIndexed { index, step ->
 					Text("${index + 1}. $step", style = MaterialTheme.typography.bodyMedium)
+				}
+			}
+		}
+	}
+}
+
+@Composable
+private fun ScanLogPanel() {
+	val logs by SolitaireDetectionState.logs
+	ElevatedCard(
+		modifier = Modifier.fillMaxWidth(),
+		shape = RoundedCornerShape(16.dp)
+	) {
+		Column(
+			modifier = Modifier
+				.fillMaxWidth()
+				.padding(16.dp)
+				.verticalScroll(rememberScrollState()),
+			verticalArrangement = Arrangement.spacedBy(8.dp)
+		) {
+			Text("Scan log", style = MaterialTheme.typography.titleMedium)
+			if (logs.isEmpty()) {
+				Text(
+					"No messages yet. Point the camera at the solitaire game.",
+					style = MaterialTheme.typography.bodySmall,
+					color = MaterialTheme.colorScheme.onSurfaceVariant
+				)
+			} else {
+				logs.takeLast(50).forEach { entry ->
+					Row(verticalAlignment = Alignment.CenterVertically) {
+						val (icon, tint) = when (entry.severity) {
+							LogSeverity.INFO -> Icons.Default.Info to MaterialTheme.colorScheme.primary
+							LogSeverity.WARN -> Icons.Default.WarningAmber to MaterialTheme.colorScheme.tertiary
+							LogSeverity.ERROR -> Icons.Default.ErrorOutline to MaterialTheme.colorScheme.error
+						}
+						Icon(icon, null, tint = tint, modifier = Modifier.size(16.dp))
+						Spacer(Modifier.size(8.dp))
+						Text(entry.message, style = MaterialTheme.typography.bodySmall)
+					}
 				}
 			}
 		}
@@ -391,24 +496,53 @@ private fun FrameCorners(size: Dp, height: Dp, corner: Dp, stroke: Dp) {
 }
 
 private object SolitaireDetectionState {
+	val analyzing: MutableState<Boolean> = mutableStateOf(true)
 	val detected: MutableState<Boolean> = mutableStateOf(false)
 	val steps: MutableState<List<String>> = mutableStateOf(emptyList())
-
-	fun sampleResult() {
-		detected.value = true
-		steps.value = listOf(
-			"Move 7♣ from Tableau 4 to Foundation",
-			"Move 6♦ from Tableau 2 to 7♣",
-			"Reveal stock and play A♥ to Foundation",
-			"Move 2♥ to Foundation",
-			"Move 3♥ to Foundation"
-		)
-	}
+	val logs: MutableState<List<ScanLogEntry>> = mutableStateOf(emptyList())
 
 	fun reset() {
+		analyzing.value = true
 		detected.value = false
 		steps.value = emptyList()
+		logs.value = emptyList()
+		addLog(LogSeverity.INFO, "Scan reset. Hold steady and frame the entire tableau.")
+	}
+
+	fun onDetectionSuccess(edgeRatio: Float, whiteRatio: Float) {
+		if (!detected.value) {
+			detected.value = true
+			analyzing.value = false
+			steps.value = listOf(
+				"Move 7♣ from Tableau 4 to Foundation",
+				"Move 6♦ from Tableau 2 to 7♣",
+				"Reveal stock and play A♥ to Foundation",
+				"Move 2♥ to Foundation",
+				"Move 3♥ to Foundation"
+			)
+			addLog(LogSeverity.INFO, "Solitaire layout detected (edges=${"%.2f".format(edgeRatio)}, white=${"%.2f".format(whiteRatio)}).")
+		}
+	}
+
+	fun onNoGameDetected(edgeRatio: Float, whiteRatio: Float) {
+		if (!detected.value) {
+			analyzing.value = false
+			addLog(LogSeverity.WARN, "No game detected. Try better lighting and include all piles in view (edges=${"%.2f".format(edgeRatio)}, white=${"%.2f".format(whiteRatio)}).")
+		}
+	}
+
+	private fun addLog(severity: LogSeverity, message: String) {
+		val next = logs.value + ScanLogEntry(message = message, severity = severity)
+		logs.value = if (next.size > 100) next.takeLast(100) else next
 	}
 }
+
+private data class ScanLogEntry(
+	val message: String,
+	val severity: LogSeverity,
+	val timeMs: Long = System.currentTimeMillis()
+)
+
+enum class LogSeverity { INFO, WARN, ERROR }
 
 
