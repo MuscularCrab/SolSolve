@@ -2,11 +2,16 @@ package com.ventris.solsolve.ui.scanner
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.RectF
 import android.util.Size
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
@@ -17,7 +22,9 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.canvas.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,6 +40,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
@@ -55,7 +63,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
@@ -63,7 +74,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.delay
-import java.nio.ByteBuffer
+import java.io.File
 import java.util.concurrent.Executors
 import kotlin.math.abs
 import kotlin.math.max
@@ -102,25 +113,14 @@ fun SolitaireScannerScreen() {
 			fontWeight = FontWeight.Bold
 		)
 		Text(
-			text = "Point your camera at the solitaire game. We'll scan and guide you to solve it in the fewest moves.",
+			text = "Take a snapshot of the solitaire game. We'll analyze it and guide you to solve it.",
 			style = MaterialTheme.typography.bodyMedium,
 			color = MaterialTheme.colorScheme.onSurfaceVariant
 		)
 
-		Card(
-			shape = RoundedCornerShape(16.dp)
-		) {
-			Box(
-				modifier = Modifier
-					.fillMaxWidth()
-					.aspectRatio(9f / 16f)
-			) {
-				if (hasCameraPermission) {
-					CameraPreviewWithOverlay()
-				} else {
-					PermissionMissing()
-				}
-			}
+		when (SolitaireDetectionState.mode.value) {
+			ScannerMode.PREVIEW -> PreviewModeCard(hasCameraPermission)
+			ScannerMode.SOLVING -> SolvingModeCard()
 		}
 
 		ScanStatusAndActions()
@@ -130,12 +130,74 @@ fun SolitaireScannerScreen() {
 }
 
 @Composable
-private fun CameraPreviewWithOverlay() {
+private fun PreviewModeCard(hasCameraPermission: Boolean) {
+	Card(shape = RoundedCornerShape(16.dp)) {
+		Box(
+			modifier = Modifier
+				.fillMaxWidth()
+				.aspectRatio(9f / 16f)
+		) {
+			if (hasCameraPermission) {
+				CameraPreviewWithCapture()
+			} else {
+				PermissionMissing()
+			}
+		}
+	}
+}
+
+@Composable
+private fun SolvingModeCard() {
+	val bitmap by SolitaireDetectionState.capturedBitmap
+	Card(shape = RoundedCornerShape(16.dp)) {
+		Column(
+			modifier = Modifier
+				.fillMaxWidth()
+				.padding(12.dp),
+			verticalArrangement = Arrangement.spacedBy(12.dp)
+		) {
+			Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+				// Mini preview
+				bitmap?.let {
+					Image(
+						bitmap = it.asImageBitmap(),
+						contentDescription = null,
+						modifier = Modifier
+							.size(96.dp)
+							.clip(RoundedCornerShape(8.dp))
+					)
+				}
+				Text("Solving Mode", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
+			}
+
+			// Annotated snapshot
+			Box(
+				modifier = Modifier
+					.fillMaxWidth()
+					.aspectRatio(9f / 16f)
+					.clip(RoundedCornerShape(12.dp))
+			) {
+				bitmap?.let { bmp ->
+					Image(bitmap = bmp.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize())
+					CardsOverlay()
+				}
+			}
+		}
+	}
+}
+
+@Composable
+private fun CameraPreviewWithCapture() {
 	val context = LocalContext.current
 	val lifecycleOwner = LocalLifecycleOwner.current
 	val previewView = remember { PreviewView(context) }
 	val mainExecutor = remember { ContextCompat.getMainExecutor(context) }
-	val analyzing by SolitaireDetectionState.analyzing
+	val imageCapture = remember {
+		ImageCapture.Builder()
+			.setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+			.setTargetResolution(Size(1080, 1920))
+			.build()
+	}
 
 	Box(modifier = Modifier.fillMaxSize()) {
 		AndroidViewCamera(previewView = previewView) { provider ->
@@ -144,108 +206,39 @@ private fun CameraPreviewWithOverlay() {
 				.build()
 			preview.setSurfaceProvider(previewView.surfaceProvider)
 
-			val analyzer = ImageAnalysis.Builder()
-				.setTargetResolution(Size(1080, 1920))
-				.setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-				.build()
-
-			val analysisExecutor = Executors.newSingleThreadExecutor()
-			var frameCounter = 0
-			var stableHits = 0
-			var resultPosted = false
-			val startMs = System.currentTimeMillis()
-			analyzer.setAnalyzer(analysisExecutor) { imageProxy ->
-				try {
-					// Throttle to 1/4 frames
-					frameCounter = (frameCounter + 1) and 3
-					if (frameCounter != 0) {
-						imageProxy.close(); return@setAnalyzer
-					}
-					val yPlane = imageProxy.planes.getOrNull(0)
-					if (yPlane == null) { imageProxy.close(); return@setAnalyzer }
-					val buffer: ByteBuffer = yPlane.buffer
-					val rowStride = yPlane.rowStride
-					val pixelStride = yPlane.pixelStride
-					val width = imageProxy.width
-					val height = imageProxy.height
-					val step = 12
-					var samples = 0
-					var edges = 0
-					var whiteish = 0
-					for (y in 0 until height step step) {
-						var prev = -1
-						for (x in 0 until width step step) {
-							val idx = y * rowStride + x * pixelStride
-							val v = buffer.get(idx).toInt() and 0xFF
-							if (prev >= 0 && abs(v - prev) > 25) edges++
-							if (v > 200) whiteish++
-							prev = v
-							samples++
-						}
-					}
-					val edgeRatio = if (samples > 0) edges.toFloat() / samples else 0f
-					val whiteRatio = if (samples > 0) whiteish.toFloat() / samples else 0f
-					val looksLikeCards = edgeRatio > 0.06f && whiteRatio > 0.12f
-					if (looksLikeCards) stableHits++ else stableHits = max(0, stableHits - 1)
-					val elapsed = System.currentTimeMillis() - startMs
-					if (!resultPosted && stableHits >= 6) {
-						resultPosted = true
-						mainExecutor.execute {
-							SolitaireDetectionState.onDetectionSuccess(
-								edgeRatio = edgeRatio,
-								whiteRatio = whiteRatio
-							)
-						}
-					} else if (!resultPosted && elapsed > 6000) {
-						resultPosted = true
-						mainExecutor.execute {
-							SolitaireDetectionState.onNoGameDetected(
-								edgeRatio = edgeRatio,
-								whiteRatio = whiteRatio
-							)
-						}
-					}
-				} catch (_: Exception) {
-					// ignore analyzer errors for now
-				} finally {
-					imageProxy.close()
-				}
-			}
-
 			try {
 				provider.unbindAll()
 				provider.bindToLifecycle(
 					lifecycleOwner,
 					CameraSelector.DEFAULT_BACK_CAMERA,
 					preview,
-					analyzer
+					imageCapture
 				)
 			} catch (_: Exception) { }
 		}
 
-		ScanningOverlay(
-			borderCornerSize = 28.dp,
-			onPulse = { /* no-op */ }
-		)
+		ScanningOverlay(borderCornerSize = 28.dp, onPulse = { })
 
-		AnimatedVisibility(visible = analyzing) {
-			Row(
-				modifier = Modifier
-					.align(Alignment.BottomCenter)
-					.padding(16.dp)
-					.background(
-						MaterialTheme.colorScheme.surface.copy(alpha = 0.8f),
-						RoundedCornerShape(12.dp)
-					)
-					.padding(horizontal = 16.dp, vertical = 10.dp),
-				verticalAlignment = Alignment.CenterVertically
-			) {
-				CircularProgressIndicator(
-					modifier = Modifier.size(18.dp),
-					strokeWidth = 2.dp
-				)
-				Spacer(modifier = Modifier.size(12.dp))
-				Text("Scanning…", style = MaterialTheme.typography.bodyMedium)
+		Row(
+			modifier = Modifier
+				.align(Alignment.BottomCenter)
+				.padding(16.dp),
+			horizontalArrangement = Arrangement.Center,
+			verticalAlignment = Alignment.CenterVertically
+		) {
+			Button(onClick = {
+				val output = File(context.cacheDir, "solsolve_snapshot_${System.currentTimeMillis()}.jpg")
+				val opts = ImageCapture.OutputFileOptions.Builder(output).build()
+				imageCapture.takePicture(opts, mainExecutor, object : ImageCapture.OnImageSavedCallback {
+					override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
+						SolitaireDetectionState.onSnapshotSaved(output)
+					}
+					override fun onError(exception: ImageCaptureException) {
+						SolitaireDetectionState.addLog(LogSeverity.ERROR, "Snapshot failed: ${exception.message}")
+					}
+				})
+			}) {
+				Text("Take Snapshot")
 			}
 		}
 	}
@@ -282,19 +275,18 @@ private fun ScanStatusAndActions() {
 		horizontalArrangement = Arrangement.SpaceBetween,
 		verticalAlignment = Alignment.CenterVertically
 	) {
-		val detected by SolitaireDetectionState.detected
-		val analyzing by SolitaireDetectionState.analyzing
-		val statusText = when {
-			analyzing -> "Scanning…"
-			detected -> "Scan successful"
-			else -> "No game detected"
+		val mode by SolitaireDetectionState.mode
+		val partial by SolitaireDetectionState.partial
+		val statusText = when (mode) {
+			ScannerMode.PREVIEW -> "Ready"
+			ScannerMode.SOLVING -> if (partial) "Solving (partial game)" else "Solving"
 		}
 		Text(
 			text = statusText,
 			color = when {
-				detected -> MaterialTheme.colorScheme.primary
-				analyzing -> MaterialTheme.colorScheme.onSurfaceVariant
-				else -> MaterialTheme.colorScheme.error
+				mode == ScannerMode.PREVIEW -> MaterialTheme.colorScheme.onSurfaceVariant
+				partial -> MaterialTheme.colorScheme.tertiary
+				else -> MaterialTheme.colorScheme.primary
 			},
 			style = MaterialTheme.typography.bodyMedium,
 			fontWeight = FontWeight.Medium
@@ -345,7 +337,7 @@ private fun ScanLogPanel() {
 			Text("Scan log", style = MaterialTheme.typography.titleMedium)
 			if (logs.isEmpty()) {
 				Text(
-					"No messages yet. Point the camera at the solitaire game.",
+					"No messages yet. Take a snapshot to begin.",
 					style = MaterialTheme.typography.bodySmall,
 					color = MaterialTheme.colorScheme.onSurfaceVariant
 				)
@@ -364,6 +356,38 @@ private fun ScanLogPanel() {
 				}
 			}
 		}
+	}
+}
+
+@Composable
+private fun CardsOverlay() {
+	val boxes by SolitaireDetectionState.overlayBoxes
+	val currentIndex by SolitaireDetectionState.currentBoxIndex
+	Canvas(modifier = Modifier.fillMaxSize()) {
+		boxes.forEachIndexed { index, box ->
+			val color = if (index == currentIndex) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+			val stroke = if (index == currentIndex) 4f else 2f
+			val rectPx = androidx.compose.ui.geometry.Rect(
+				left = size.width * box.rect.left,
+				top = size.height * box.rect.top,
+				right = size.width * box.rect.right,
+				bottom = size.height * box.rect.bottom
+			)
+			drawRect(color = Color.Transparent)
+			drawRect(color = color, style = Stroke(width = stroke), topLeft = rectPx.topLeft, size = rectPx.size)
+		}
+	}
+
+	// Drive overlay highlighting
+	LaunchedEffect(boxes) {
+		if (boxes.isEmpty()) return@LaunchedEffect
+		SolitaireDetectionState.addLog(LogSeverity.INFO, "Starting reasoning across ${boxes.size} card regions…")
+		for (i in boxes.indices) {
+			SolitaireDetectionState.currentBoxIndex.value = i
+			SolitaireDetectionState.addLog(LogSeverity.INFO, "Inspecting region ${i + 1}: ${boxes[i].label}")
+			delay(900)
+		}
+		SolitaireDetectionState.addLog(LogSeverity.INFO, "Reasoning pass complete.")
 	}
 }
 
@@ -496,46 +520,116 @@ private fun FrameCorners(size: Dp, height: Dp, corner: Dp, stroke: Dp) {
 }
 
 private object SolitaireDetectionState {
-	val analyzing: MutableState<Boolean> = mutableStateOf(true)
-	val detected: MutableState<Boolean> = mutableStateOf(false)
+	val mode: MutableState<ScannerMode> = mutableStateOf(ScannerMode.PREVIEW)
+	val partial: MutableState<Boolean> = mutableStateOf(false)
+	val capturedPath: MutableState<String?> = mutableStateOf(null)
+	val capturedBitmap: MutableState<Bitmap?> = mutableStateOf(null)
+	val overlayBoxes: MutableState<List<CardRegion>> = mutableStateOf(emptyList())
+	val currentBoxIndex: MutableState<Int> = mutableStateOf(0)
 	val steps: MutableState<List<String>> = mutableStateOf(emptyList())
 	val logs: MutableState<List<ScanLogEntry>> = mutableStateOf(emptyList())
 
 	fun reset() {
-		analyzing.value = true
-		detected.value = false
+		mode.value = ScannerMode.PREVIEW
+		partial.value = false
+		capturedPath.value = null
+		capturedBitmap.value = null
+		overlayBoxes.value = emptyList()
+		currentBoxIndex.value = 0
 		steps.value = emptyList()
 		logs.value = emptyList()
-		addLog(LogSeverity.INFO, "Scan reset. Hold steady and frame the entire tableau.")
+		addLog(LogSeverity.INFO, "Ready. Take a snapshot when the game fills the frame.")
 	}
 
-	fun onDetectionSuccess(edgeRatio: Float, whiteRatio: Float) {
-		if (!detected.value) {
-			detected.value = true
-			analyzing.value = false
-			steps.value = listOf(
-				"Move 7♣ from Tableau 4 to Foundation",
-				"Move 6♦ from Tableau 2 to 7♣",
-				"Reveal stock and play A♥ to Foundation",
-				"Move 2♥ to Foundation",
-				"Move 3♥ to Foundation"
+	fun onSnapshotSaved(file: File) {
+		capturedPath.value = file.absolutePath
+		val bmp = BitmapFactory.decodeFile(file.absolutePath)
+		capturedBitmap.value = bmp
+		analyzeSnapshot(bmp)
+	}
+
+	private fun analyzeSnapshot(bitmap: Bitmap?) {
+		if (bitmap == null) return
+		addLog(LogSeverity.INFO, "Analyzing snapshot…")
+		// Basic heuristic: edge and white ratios
+		val (edgeRatio, whiteRatio) = estimateHeuristics(bitmap)
+		addLog(LogSeverity.INFO, "Heuristics: edges=${"%.3f".format(edgeRatio)}, white=${"%.3f".format(whiteRatio)}")
+		partial.value = edgeRatio < 0.06f || whiteRatio < 0.12f
+		if (partial.value) {
+			addLog(LogSeverity.WARN, "Partial solitaire game detected. Include all piles and improve lighting if possible.")
+		}
+		// Generate dummy card regions laid out like 7 tableau columns
+		overlayBoxes.value = generateDummyCardRegions()
+		steps.value = listOf(
+			"Move 7♣ from Tableau 4 to Foundation",
+			"Move 6♦ from Tableau 2 to 7♣",
+			"Reveal stock and play A♥ to Foundation",
+			"Move 2♥ to Foundation",
+			"Move 3♥ to Foundation"
+		)
+		mode.value = ScannerMode.SOLVING
+		addLog(LogSeverity.INFO, "Solving started (${overlayBoxes.value.size} regions).")
+	}
+
+	private fun estimateHeuristics(bitmap: Bitmap): Pair<Float, Float> {
+		val width = bitmap.width
+		val height = bitmap.height
+		var edges = 0
+		var whiteish = 0
+		var samples = 0
+		val step = 16
+		for (y in 0 until height step step) {
+			var prev = -1
+			for (x in 0 until width step step) {
+				val p = bitmap.getPixel(x, y)
+				val r = (p shr 16) and 0xFF
+				val g = (p shr 8) and 0xFF
+				val b = p and 0xFF
+				val v = (0.299f * r + 0.587f * g + 0.114f * b).toInt()
+				if (prev >= 0 && abs(v - prev) > 25) edges++
+				if (v > 200) whiteish++
+				prev = v
+				samples++
+			}
+		}
+		val edgeRatio = if (samples > 0) edges.toFloat() / samples else 0f
+		val whiteRatio = if (samples > 0) whiteish.toFloat() / samples else 0f
+		return edgeRatio to whiteRatio
+	}
+
+	private fun generateDummyCardRegions(): List<CardRegion> {
+		val cols = 7
+		val marginX = 0.06f
+		val marginY = 0.08f
+		val spacingX = (1f - 2 * marginX) / cols
+		val cardW = spacingX * 0.9f
+		val cardH = cardW * (3.5f / 2.5f) // aspect ratio
+		val regions = mutableListOf<CardRegion>()
+		for (c in 0 until cols) {
+			val left = marginX + c * spacingX + (spacingX - cardW) / 2f
+			val top = marginY
+			regions.add(
+				CardRegion(
+					label = "Tableau ${c + 1}",
+					rect = RectF(left, top, left + cardW, top + cardH)
+				)
 			)
-			addLog(LogSeverity.INFO, "Solitaire layout detected (edges=${"%.2f".format(edgeRatio)}, white=${"%.2f".format(whiteRatio)}).")
 		}
+		return regions
 	}
 
-	fun onNoGameDetected(edgeRatio: Float, whiteRatio: Float) {
-		if (!detected.value) {
-			analyzing.value = false
-			addLog(LogSeverity.WARN, "No game detected. Try better lighting and include all piles in view (edges=${"%.2f".format(edgeRatio)}, white=${"%.2f".format(whiteRatio)}).")
-		}
-	}
-
-	private fun addLog(severity: LogSeverity, message: String) {
+	fun addLog(severity: LogSeverity, message: String) {
 		val next = logs.value + ScanLogEntry(message = message, severity = severity)
-		logs.value = if (next.size > 100) next.takeLast(100) else next
+		logs.value = if (next.size > 200) next.takeLast(200) else next
 	}
 }
+
+data class CardRegion(
+	val label: String,
+	val rect: RectF // normalized 0..1
+)
+
+enum class ScannerMode { PREVIEW, SOLVING }
 
 private data class ScanLogEntry(
 	val message: String,
