@@ -53,8 +53,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.layout.offset
-import androidx.compose.ui.unit.IntOffset
+import androidx.compose.foundation.layout.offset
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.delay
@@ -333,7 +332,7 @@ private fun ScanningOverlay(
 					.height(2.dp)
 					.background(MaterialTheme.colorScheme.primary)
 					.align(Alignment.TopStart)
-					.offset { IntOffset(0, (yFactor * 440).dp.roundToPx()) }
+					.offset(y = (yFactor * 440).dp)
 			)
 		}
 	}
