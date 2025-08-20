@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -52,8 +53,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
-import androidx.compose.foundation.layout.offset
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.delay
@@ -131,7 +132,7 @@ private fun CameraPreviewWithOverlay() {
 			val preview = Preview.Builder()
 				.setTargetResolution(Size(1080, 1920))
 				.build()
-			preview.surfaceProvider = previewView.surfaceProvider
+			preview.setSurfaceProvider(previewView.surfaceProvider)
 
 			val analyzer = ImageAnalysis.Builder()
 				.setTargetResolution(Size(1080, 1920))
