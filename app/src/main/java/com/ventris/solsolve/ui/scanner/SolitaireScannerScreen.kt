@@ -24,7 +24,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.canvas.Canvas
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -363,9 +363,11 @@ private fun ScanLogPanel() {
 private fun CardsOverlay() {
 	val boxes by SolitaireDetectionState.overlayBoxes
 	val currentIndex by SolitaireDetectionState.currentBoxIndex
+	val primaryColor = MaterialTheme.colorScheme.primary
+	val dimColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
 	Canvas(modifier = Modifier.fillMaxSize()) {
 		boxes.forEachIndexed { index, box ->
-			val color = if (index == currentIndex) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+			val color = if (index == currentIndex) primaryColor else dimColor
 			val stroke = if (index == currentIndex) 4f else 2f
 			val rectPx = androidx.compose.ui.geometry.Rect(
 				left = size.width * box.rect.left,
@@ -373,7 +375,6 @@ private fun CardsOverlay() {
 				right = size.width * box.rect.right,
 				bottom = size.height * box.rect.bottom
 			)
-			drawRect(color = Color.Transparent)
 			drawRect(color = color, style = Stroke(width = stroke), topLeft = rectPx.topLeft, size = rectPx.size)
 		}
 	}
