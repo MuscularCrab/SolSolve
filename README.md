@@ -5,7 +5,8 @@ A snapshot-based assistant that analyzes a Klondike (Draw 3) solitaire game runn
 ## Status
 - App: Jetpack Compose + CameraX snapshot flow with scanning overlay, scan status, internal log, and friendly UI.
 - Heuristics: OpenCV contour pass (optional) for quick card/pile cues.
-- Models: Pluggable TFLite pipeline (detector + rank/suit, or 52-class card classifier). Model assets and docs included.
+- Models: **Placeholder TFLite models in place** - ready for training data collection and model training.
+- **Next Step**: Collect training data and train the ML models using the comprehensive guide in `app/src/main/assets/models/TRAINING_GUIDE.md`
 
 ## Features
 - Snapshot-first UX: Tap Take Snapshot, then Solving Mode with a mini preview.
@@ -115,10 +116,20 @@ Quick summary:
 - No moves: When no model is installed, moves are disabled; enable Demo for sample suggestions
 
 ## Roadmap
-- Integrate TFLite loader + inference; switch Demo off by default
-- Solver engine for Klondike Draw 3 using recognized state
-- Annotated overlays for QA (toggle) and confidence summaries
-- Batch testing and metrics view
+- ✅ **COMPLETED**: TFLite loader + inference architecture ready
+- ✅ **COMPLETED**: Placeholder models and training guide created
+- 🔄 **IN PROGRESS**: Collect training data and train ML models
+- 🔄 **NEXT**: Solver engine for Klondike Draw 3 using recognized state
+- 🔄 **FUTURE**: Annotated overlays for QA (toggle) and confidence summaries
+- 🔄 **FUTURE**: Batch testing and metrics view
+
+**Immediate Next Steps:**
+1. **Collect 400-800 training images** of Klondike solitaire games
+2. **Train detection model** using Roboflow (recommended) or local YOLOv8
+3. **Train classification models** (rank + suit OR single 52-class)
+4. **Test on real device** and iterate
+
+See `app/src/main/assets/models/TRAINING_GUIDE.md` for detailed instructions.
 
 ## Privacy & Licensing
 - Do not include private datasets or trained models in the repo unless cleared

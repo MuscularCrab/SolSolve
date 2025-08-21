@@ -1,0 +1,14 @@
+# This is a placeholder file for the detector.tflite model
+# 
+# To get a working model, you need to:
+# 1. Collect training data (400-800 images of Klondike solitaire games)
+# 2. Label the images with bounding boxes for:
+#    - card_face_up
+#    - card_back  
+#    - pile_slot_tableau
+#    - pile_slot_foundation
+# 3. Train a YOLOv8 model or use Roboflow
+# 4. Export as TFLite (int8 quantized)
+# 5. Replace this file with the trained model
+#
+# See the README.md in this directory for detailed training instructions
