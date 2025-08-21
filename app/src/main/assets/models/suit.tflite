@@ -1,0 +1,11 @@
+# This is a placeholder file for the suit.tflite model
+#
+# To get a working model, you need to:
+# 1. Crop the top-left corner of each detected face-up card (64x64 pixels)
+# 2. Create 4 classes: clubs, diamonds, hearts, spades
+# 3. Train a classification model (CNN) on these crops
+# 4. Export as TFLite (int8 quantized)
+# 5. Replace this file with the trained model
+#
+# Alternative: Use a single card52.tflite model instead of rank+suit
+# See the README.md in this directory for detailed training instructions
